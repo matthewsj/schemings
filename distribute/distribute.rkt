@@ -61,7 +61,10 @@
   (let* ([path (path-between origin destination overall-pict
                              #:origin-locator find-origin-pt
                              #:destination-locator find-destination-pt)]
-         [distributed-pict (distribute path objects-to-distribute #:rotate rotate?)])
+         [distributed-pict (distribute path 
+                                       (append (cons (λ (a) (ghost origin)) objects-to-distribute)
+                                               (list (λ (a) (ghost destination))))
+                                       #:rotate rotate?)])
     (pin-over overall-pict origin find-origin-pt distributed-pict)))
 
 (define (distance p1 p2)
@@ -91,7 +94,7 @@
       (let ([t (+ (pth-min pth) (* i each-delta-t))])
         (pt t ((pth-fx pth) t) ((pth-fy pth) t))))))
 
-;; get-equidistant-points : pth nat[>=2] -> (listof pt)
+;; evenly-across-range : pth nat[>=2] -> (listof pt)
 ;; Returns n points that separate the arc described by path into equal lengths
 (define (evenly-across-range pth n)
   (let ([fx (pth-fx pth)]

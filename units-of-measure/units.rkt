@@ -5,31 +5,34 @@
 ;; =============================================================================
 ;; TODO:
 ;; * docs [already started]
-;; * custom printer for units
 ;; * library of units
 ;; * better way to specify families? (relationships via other units, e.g. inches
 ;;      in a foot -> feet in a mile
-;; * conversions between families for different scales on the same measure (e.g.
-;;      metric vs english distance units
-;; * ability to define derived units? e.g. Hz = 1/seconds, and allow printer
-;;      or some other explicit conversion between the two
-;; * ability to scale units to some nice scale. this is problematic with derived
-;;      units.
-;; * should there be a way to extract subunits? it would be good if unit scaling
-;;      could be written in user code.
-
 ;; =============================================================================
 ;; UNITS OF MEASURE
+;;
+;; Terminology:
+;;    - A _dimension_ is a measurable quantity, e.g. distance, time.
+;;    - A _scale_ is a family of base units that measure some dimension,
+;;          e.g. imperial or metric units of distance.
+;;    - A _base unit_ is a unit in a scale; e.g. meters, feet.
+;;    - A _derived unit_ is a unit formed by the multiplication and division
+;;          of base units, e.g. meters/second^2.
 
-;; base-unit ::= (base-unit symbol symbol real)
+;; dimension ::= (dimension symbol (listof scale))
+;; scale ::= (scale symbol dimension hasheq[scale -o> conversion])
+;; conversion ::= (conversion base-unit base-unit real)
+;; base-unit ::= (base-unit scale symbol real)
 ;; unit ::= (unit-of-measure (listof base-unit) (listof base-unit))
 ;;   where:
 ;;   * no base-unit is repeated in the numerator and denominator, and
-;;   * all units of the same family are expressed with the same unit, and
+;;   * all units of the same scale are expressed with the same unit, and
 ;;   * within the numerator and the denominator, base units are ordered by
-;;   * family<?.
-
-(struct base-unit (family name conversion-weight) #:transparent)
+;;   * scale<?.
+(struct dimension (name [scales #:mutable]))
+(struct scale (name dimension [conversions #:mutable]))
+(struct conversion (from to scaling-factor))
+(struct base-unit (scale name conversion-weight) #:transparent)
 
 (define (write-unit unit out write?)
   (fprintf out (format-unit unit)))
@@ -73,16 +76,17 @@
 (define unit-or-measure/c (or/c measure-or-number/c unit-of-measure?))
 
 (provide 
- define-units-of-measure
+ define-dimension
+ define-scale
  unit-of-measure?
  (contract-out
   [unitless unit-of-measure?]
   [inverse (-> unit-of-measure? unit-of-measure?)]
-  [unit-of-measure-family (->* (symbol?) #:rest (listof (list/c symbol? number?))
-                               (listof unit-of-measure?))]
   [multiply-units (->* () #:rest (listof unit-of-measure?) unit-of-measure?)]
   [divide-units (-> unit-of-measure? unit-of-measure? unit-of-measure?)]
-  [conversion-factor (-> unit-of-measure? unit-of-measure? number?)])
+  [conversion-factor (-> unit-of-measure? unit-of-measure? number?)]
+  [set-conversion! (-> unit-of-measure? real? unit-of-measure? any)])
+ (struct-out dimension)
  (struct-out measure)
  (struct-out exn:fail:contract:conversion)
  (contract-out
@@ -97,9 +101,9 @@
   [times (->* () #:rest (listof unit-or-measure/c) unit-or-measure/c)]
   [divided-by (-> unit-or-measure/c unit-or-measure/c unit-or-measure/c)]))
 
-(define (family<? a b)
-  (string<? (symbol->string (base-unit-family a))
-            (symbol->string (base-unit-family b))))
+(define (scale<? a b)
+  (string<? (symbol->string (scale-name (base-unit-scale a)))
+            (symbol->string (scale-name (base-unit-scale b)))))
 
 ;; Trivial unit that represents scalar quantities.
 (define unitless (unit-of-measure '() '()))
@@ -108,38 +112,53 @@
   (unit-of-measure (unit-of-measure-denominator u)
                    (unit-of-measure-numerator u)))
 
-;; unit-of-measure-family : symbol (list symbol number)... -> (values unit...)
-(define (unit-of-measure-family family-name . members)   
-  (for/list ([m members])
-    (unit-of-measure 
-     (list (base-unit family-name (car m) (cadr m))) 
-     '())))
+(define-syntax-rule (define-dimension name)
+  (define name (dimension 'name '())))
 
-(define-syntax-rule (define-units-of-measure family-name (member-name member-scale) ...)
-  (define-values (member-name ...)
-    (apply values (unit-of-measure-family 'family-name (list 'member-name member-scale) ...))))
+(define-syntax-rule (define-scale dimension scale-name (member-name member-scale) ...)
+  (define-values (scale-name member-name ...)
+    (let ([d dimension])
+      (unless (dimension? d)
+        (raise (exn:fail:contract
+                (format "Expected a dimension, given: ~e" d)
+                (current-continuation-marks))))
+      (let* ([scale (scale 'scale-name d (hasheq))]
+             [units (for/list ([m (list (list 'member-name member-scale) ...)])
+                      (unit-of-measure
+                       (list (base-unit scale (car m) (cadr m))) 
+                       '()))])
+        (set-dimension-scales! d (cons scale (dimension-scales d)))
+        (apply values scale units)))))
 
 ;; flip : (a b -> c) -> b a -> c
 (define ((flip f) a b) (f b a))
 
 ;; base-units-of : unit -> (seteq-of base-unit)
 ;; Returns the set of all distinct base units in the given unit. Guarantees that
-;; each unit in the return value has a distinct family.
+;; each unit in the return value has a distinct scale.
 (define (base-units-of unit)
   (set-union
    (apply seteq (unit-of-measure-numerator unit))
    (apply seteq (unit-of-measure-denominator unit))))
 
+;; extract-base-unit : unit -> base-unit
+;; gets the underlying base unit representation of a base unit represented in canonical form.
+(define (extract-base-unit unit)
+  (unless (and (eq? (length (unit-of-measure-numerator unit)) 1)
+               (null? (unit-of-measure-denominator unit)))
+    (raise (exn:fail:contract "Not a base unit" (current-continuation-marks))))
+  (car (unit-of-measure-numerator unit)))
+
 ;; convert-base-units : unit (seteq-of base-unit) -> unit
-;; Side constraint: each base-unit in the input set must have a distinct family.
-;; Converts every base-unit within unit that shares a family with a base unit in conversions
-;; to the instance of the family that appears in conversions.
+;; Side constraint: each base-unit in the input set must have a distinct scale.
+;; Converts every base-unit within unit that shares a scale with a base unit in conversions
+;; to the instance of the scale that appears in conversions.
 (define (convert-base-units unit conversions)  
   (define conversion-map 
     (for/hasheq ([base-unit conversions])
-      (values (base-unit-family base-unit) base-unit)))
+      (values (base-unit-scale base-unit) base-unit)))
   (define (conv base-unit)
-    (let ([conversion (hash-ref conversion-map (base-unit-family base-unit) #f)])
+    (let ([conversion (hash-ref conversion-map (base-unit-scale base-unit) #f)])
       (or conversion base-unit)))
   (unit-of-measure
    (map conv (unit-of-measure-numerator unit))
@@ -169,8 +188,8 @@
                 [(residual-numerator-b residual-denominator-a)
                  (cancel (unit-of-measure-numerator b)
                          (unit-of-measure-denominator a))])
-    (unit-of-measure (merge-sorted-lists residual-numerator-a residual-numerator-b family<?)
-                     (merge-sorted-lists residual-denominator-a residual-denominator-b family<?))))
+    (unit-of-measure (merge-sorted-lists residual-numerator-a residual-numerator-b scale<?)
+                     (merge-sorted-lists residual-denominator-a residual-denominator-b scale<?))))
 
 ;; multiply-units : unit ... -> unit
 ;; Returns the product of all units.
@@ -186,23 +205,84 @@
   (from to)
   #:transparent)
 
+;; =============================================================================
+;; Scale conversions
+;; We want to allow users to define new conversion types, and have those types
+;; interconvert with existing types. For that, we create a registry of all
+;; dimensions, and for each dimension associate a set of scales. When necessary
+;; we can convert from scale to scale while keeping the same dimension.
+
+(define (dimension-of base-unit)
+  (scale-dimension (base-unit-scale base-unit)))
+
+(define (set-conversion! from-unit/nonbase scaling-factor to-unit/nonbase)
+  (let ([from-unit (extract-base-unit from-unit/nonbase)]
+        [to-unit (extract-base-unit to-unit/nonbase)])
+    (unless (eq? (dimension-of from-unit)
+                 (dimension-of to-unit))
+      (raise (exn:fail:contract
+              (format "Unit ~s measures dimension ~s, which is incompatible with unit ~s, which measures dimension ~s"
+                      (base-unit-name from-unit)
+                      (dimension-name (dimension-of from-unit))
+                      (base-unit-name to-unit)
+                      (dimension-name (dimension-of to-unit)))
+              (current-continuation-marks))))
+    (when (eq? (base-unit-scale from-unit) (base-unit-scale to-unit))
+      (raise (exn:fail:contract
+              "Cannot set conversion of units within the same scale"
+              (current-continuation-marks))))
+  
+    ;; TODO: Once base scales are updated, compute transitive closure. This will require
+    ;; validity checking (i.e. verify that the new conversion is compatible with the
+    ;; conversions we have already learned about, and abort the whole thing if not)
+    (let ([d (dimension-of from-unit)]
+          [from-scale (base-unit-scale from-unit)]
+          [to-scale (base-unit-scale to-unit)])
+      (set-scale-conversions! from-scale 
+                              (hash-set (scale-conversions from-scale)
+                                        to-scale (conversion from-unit to-unit scaling-factor)))
+      (set-scale-conversions! to-scale 
+                              (hash-set (scale-conversions to-scale)
+                                        from-scale (conversion to-unit from-unit (/ 1 scaling-factor)))))))
+
+;; convertible-base-units? : base-unit base-unit -> boolean?
+(define (convertible-base-units? from to)
+  (or (eq? (base-unit-scale from) (base-unit-scale to))
+      (hash-has-key? (scale-conversions (base-unit-scale from)) (base-unit-scale to))))
+
+;; conversion-factor/within-scale : base-unit base-unit -> real?
+;; computes the conversion factor within a single scale
+(define (conversion-factor/within-scale f t)
+  (/ (base-unit-conversion-weight f) (base-unit-conversion-weight t)))
+
+(define (base-unit-conversion-factor from to)
+  (cond
+    [(eq? (base-unit-scale from) (base-unit-scale to))
+     (conversion-factor/within-scale from to)]
+    [(hash-ref (scale-conversions (base-unit-scale from)) (base-unit-scale to) #f)
+     =>
+     (lambda (conversion)
+       (* (conversion-factor/within-scale from (conversion-from conversion))
+          (conversion-scaling-factor conversion)
+          (conversion-factor/within-scale (conversion-to conversion) to)))]
+    [else 
+     (raise 
+      (exn:fail:contract:conversion
+       (format "Could not convert unit ~s to ~s" (base-unit-name from) (base-unit-name to))
+       (current-continuation-marks)
+       (unit-of-measure (list from) '())
+       (unit-of-measure (list to) '())))]))
+
 ;; conversion-factor/list : (listof base-unit) (listof base-unit) -> number
-;; side constraint: both lists are sorted by base unit, in family<? order, and
-;; within an input each unit of a given family is expressed in the same units.
+;; side constraint: both lists are sorted by base unit, in scale<? order, and
+;; within an input each unit of a given scale is expressed in the same units.
 ;;
 ;; Determines the conversion factor needed to convert a measure expressed as the
 ;; product of each unit in from into a measure expressed as the product of each
 ;; unit in to. Raises exn:fail:contract:conversion if the units are not convertible.
 (define (conversion-factor/list from to)
-  (foldl (λ (f t prev-factor)
-           (unless (eq? (base-unit-family f) (base-unit-family t))
-             (raise (exn:fail:contract:conversion
-                     (format "Could not convert unit ~s to ~s" (base-unit-name f) (base-unit-name t))
-                     (current-continuation-marks)
-                     (unit-of-measure (list f) '())
-                     (unit-of-measure (list t) '()))))
-           (* (/ (base-unit-conversion-weight f) (base-unit-conversion-weight t))
-              prev-factor))
+  (foldl (λ (f t prev-factor)           
+           (* (base-unit-conversion-factor f t) prev-factor))
          1
          from to))
 
@@ -219,7 +299,7 @@
 ;; =============================================================================
 ;; MEASURES
 
-;; convert : measure canonical-form-unit -> measure
+;; convert : measure unit -> measure
 ;; converts the given measure to the given unit. Raises exn:fail:contract:conversion
 ;; if the measure cannot be converted to the desired unit.
 (define (convert original-measure target-unit)

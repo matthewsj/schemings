@@ -3,8 +3,19 @@
 (require rackunit)
 (require "units.rkt")
 
-(define-units-of-measure time (minutes 1) (hours 60))
-(define-units-of-measure distance (inches 1) (feet 12) (miles 63360))
+(define-dimension time)
+(define-dimension distance)
+
+(define-scale time standard-time (minutes 1) (hours 60))
+(define-scale distance english-distance (inches 1) (feet 12) (miles 63360))
+(define-scale distance metric-distance (meters 1) (kilometers 1000))
+(set-conversion! meters 3.2808399 feet)
+
+;; fake scales for easy-scale-conversion testing
+(define-dimension fake)
+(define-scale fake foo (foos 1) (kilofoos 1000))
+(define-scale fake bar (bars 1) (kilobars 1000))
+(set-conversion! foos 10 bars) ; a foo is worth 10 bars
 
 (define feet-per-minute (divide-units feet minutes))
 (define feet-per-hour (divide-units feet hours))
@@ -115,6 +126,17 @@
   (divide-measures (miles 10) (minutes 20))
   miles-per-hour)
  (miles-per-hour 30))
+
+;; implicit scale conversions tests
+(check-equal?
+ (convert (foos 1) bars)
+ (bars 10))
+(check-equal?
+ (plus (bars 1) (foos 1))
+ (bars 11))
+(check-equal?
+ (convert (divided-by (bars 10) (hours 1)) (divided-by foos hours))
+ (divided-by (foos 1) (hours 1)))
 
 (let ([* times] [/ divided-by] [+ plus] [- minus])
   (check-equal?
